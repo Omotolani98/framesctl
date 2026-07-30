@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,58 +19,71 @@ import (
 
 func TestUploadVideoSuccess(t *testing.T) {
 	var (
-		gotFilename      string
-		gotContent       string
-		gotContentLength int64
-		gotPath          string
+		gotFilename string
+		gotContent  string
+		gotPaths    []string
 	)
+	partBodies := map[int]string{}
 
-	server := httptest.NewServer(http.HandlerFunc(func(
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(
 		writer http.ResponseWriter,
 		request *http.Request,
 	) {
-		gotPath = request.URL.Path
-		gotContentLength = request.ContentLength
+		gotPaths = append(gotPaths, request.URL.Path)
+		switch request.URL.Path {
+		case initiateUploadPath:
+			var payload InitiateUploadRequest
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			gotFilename = payload.Filename
+			writeJSONResponse(writer, http.StatusCreated, InitiateUploadResponse{
+				Bucket:        "videos",
+				Key:           "videos/2026/07/30/abc.mp4",
+				UploadID:      "upload-1",
+				PartSize:      4,
+				ContentType:   "video/mp4",
+				ContentLength: payload.ContentLength,
+			})
 
-		mediaType, _, err := mime.ParseMediaType(
-			request.Header.Get("Content-Type"),
-		)
-		if err != nil || mediaType != "multipart/form-data" {
-			writer.WriteHeader(http.StatusBadRequest)
-			return
+		case signUploadPartPath:
+			var payload SignUploadPartRequest
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			writeJSONResponse(writer, http.StatusOK, SignUploadPartResponse{
+				URL: server.URL + "/s3/part/" + strconv.Itoa(int(payload.PartNumber)),
+			})
+
+		case completeUploadPath:
+			gotContent = partBodies[1] + partBodies[2] + partBodies[3] + partBodies[4]
+			writeJSONResponse(writer, http.StatusCreated, UploadResponse{
+				Message:       "video uploaded",
+				Bucket:        "videos",
+				Key:           "videos/2026/07/30/abc.mp4",
+				Location:      "https://s3.example/abc.mp4",
+				ETag:          "etag-final",
+				ContentLength: int64(len(gotContent)),
+				ContentType:   "video/mp4",
+			})
+
+		case "/s3/part/1", "/s3/part/2", "/s3/part/3", "/s3/part/4":
+			partNumber, _ := strconv.Atoi(strings.TrimPrefix(request.URL.Path, "/s3/part/"))
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			partBodies[partNumber] = string(body)
+			writer.Header().Set("ETag", "etag-"+strconv.Itoa(partNumber))
+			writer.WriteHeader(http.StatusOK)
+
+		default:
+			writer.WriteHeader(http.StatusNotFound)
 		}
-
-		reader, err := request.MultipartReader()
-		if err != nil {
-			writer.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		part, err := reader.NextPart()
-		if err != nil || part.FormName() != "video" {
-			writer.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		gotFilename = part.FileName()
-
-		content, err := io.ReadAll(part)
-		if err != nil {
-			writer.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		gotContent = string(content)
-
-		writer.Header().Set("Content-Type", "application/json")
-		writer.WriteHeader(http.StatusCreated)
-
-		_ = json.NewEncoder(writer).Encode(UploadResponse{
-			Message:       "video uploaded",
-			Key:           "videos/2026/07/30/abc.mp4",
-			ContentLength: int64(len(content)),
-			ContentType:   "video/mp4",
-		})
 	}))
 	defer server.Close()
 
@@ -89,8 +102,8 @@ func TestUploadVideoSuccess(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 
-	if gotPath != uploadPath {
-		t.Errorf("path = %q, want %q", gotPath, uploadPath)
+	if gotPaths[0] != initiateUploadPath {
+		t.Errorf("first path = %q, want %q", gotPaths[0], initiateUploadPath)
 	}
 
 	if gotFilename != "clip.mp4" {
@@ -101,51 +114,43 @@ func TestUploadVideoSuccess(t *testing.T) {
 		t.Errorf("content = %q, want fake-video-bytes", gotContent)
 	}
 
-	if gotContentLength <= int64(len(gotContent)) {
-		t.Errorf(
-			"content length = %d, want multipart length greater than file length %d",
-			gotContentLength,
-			len(gotContent),
-		)
-	}
-
 	if upload.Key != "videos/2026/07/30/abc.mp4" {
 		t.Errorf("key = %q", upload.Key)
 	}
 }
 
 func TestUploadVideoReportsProgress(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(
+	content := []byte(strings.Repeat("video", 4096))
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(
 		writer http.ResponseWriter,
 		request *http.Request,
 	) {
-		if err := request.ParseMultipartForm(1 << 20); err != nil {
-			writer.WriteHeader(http.StatusBadRequest)
-			return
+		switch request.URL.Path {
+		case initiateUploadPath:
+			writeJSONResponse(writer, http.StatusCreated, InitiateUploadResponse{
+				Bucket:        "videos",
+				Key:           "videos/2026/07/30/progress.mp4",
+				UploadID:      "upload-1",
+				PartSize:      int64(len(content)),
+				ContentType:   "video/mp4",
+				ContentLength: int64(len(content)),
+			})
+		case signUploadPartPath:
+			writeJSONResponse(writer, http.StatusOK, SignUploadPartResponse{URL: server.URL + "/s3/part/1"})
+		case "/s3/part/1":
+			_, _ = io.Copy(io.Discard, request.Body)
+			writer.Header().Set("ETag", "etag-1")
+			writer.WriteHeader(http.StatusOK)
+		case completeUploadPath:
+			writeJSONResponse(writer, http.StatusCreated, UploadResponse{Key: "videos/2026/07/30/progress.mp4"})
+		default:
+			writer.WriteHeader(http.StatusNotFound)
 		}
-
-		file, _, err := request.FormFile("video")
-		if err != nil {
-			writer.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		defer file.Close()
-
-		if _, err := io.Copy(io.Discard, file); err != nil {
-			writer.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		writer.Header().Set("Content-Type", "application/json")
-		writer.WriteHeader(http.StatusCreated)
-
-		_ = json.NewEncoder(writer).Encode(UploadResponse{
-			Key: "videos/2026/07/30/progress.mp4",
-		})
 	}))
 	defer server.Close()
 
-	content := []byte(strings.Repeat("video", 4096))
 	path := filepath.Join(t.TempDir(), "progress.mp4")
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
@@ -303,10 +308,16 @@ func TestClientUploadURL(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 
-	want := "https://framesrvr.example/api/v1/framesrvr/videos"
+	want := "https://framesrvr.example/api/v1/framesrvr/uploads"
 	if got := client.UploadURL(); got != want {
 		t.Errorf("UploadURL() = %q, want %q", got, want)
 	}
+}
+
+func writeJSONResponse(writer http.ResponseWriter, status int, payload any) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+	_ = json.NewEncoder(writer).Encode(payload)
 }
 
 func TestLookupVideoType(t *testing.T) {

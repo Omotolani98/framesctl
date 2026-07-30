@@ -33,19 +33,232 @@ type VideoUploader interface {
 	) (storage.UploadResult, error)
 }
 
+type MultipartUploader interface {
+	CreateMultipartUpload(
+		ctx context.Context,
+		key string,
+		contentType string,
+	) (storage.MultipartUpload, error)
+	SignUploadPart(
+		ctx context.Context,
+		key string,
+		uploadID string,
+		partNumber int32,
+	) (storage.SignedUploadPart, error)
+	CompleteMultipartUpload(
+		ctx context.Context,
+		key string,
+		uploadID string,
+		parts []framesrvr.CompleteUploadPart,
+		contentLength int64,
+		contentType string,
+	) (storage.UploadResult, error)
+	AbortMultipartUpload(
+		ctx context.Context,
+		key string,
+		uploadID string,
+	) error
+}
+
 type VideoHandler struct {
 	uploader       VideoUploader
+	multipart      MultipartUploader
 	maxUploadBytes int64
 }
 
 func NewVideoHandler(
-	uploader VideoUploader,
+	uploader interface {
+		VideoUploader
+		MultipartUploader
+	},
 	maxUploadBytes int64,
 ) *VideoHandler {
 	return &VideoHandler{
 		uploader:       uploader,
+		multipart:      uploader,
 		maxUploadBytes: maxUploadBytes,
 	}
+}
+
+func (handler *VideoHandler) InitiateMultipartUpload(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	var payload framesrvr.InitiateUploadRequest
+	if !decodeJSON(writer, request, &payload) {
+		return
+	}
+
+	if payload.ContentLength <= 0 {
+		writeError(writer, http.StatusBadRequest, "content_length must be greater than zero")
+		return
+	}
+
+	if payload.ContentLength > handler.maxUploadBytes {
+		writeError(writer, http.StatusRequestEntityTooLarge, "video exceeds maximum upload size")
+		return
+	}
+
+	extension := strings.ToLower(filepath.Ext(payload.Filename))
+	videoType, allowed := framesrvr.LookupVideoType(extension)
+	if !allowed {
+		writeError(
+			writer,
+			http.StatusUnsupportedMediaType,
+			"unsupported video extension; allowed: "+framesrvr.AllowedExtensionsText(),
+		)
+		return
+	}
+
+	objectKey, err := newVideoKey(extension)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "could not generate video identifier")
+		return
+	}
+
+	upload, err := handler.multipart.CreateMultipartUpload(
+		request.Context(),
+		objectKey,
+		videoType.ContentType,
+	)
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "failed to start upload")
+		return
+	}
+
+	writeJSON(
+		writer,
+		http.StatusCreated,
+		framesrvr.InitiateUploadResponse{
+			Bucket:        upload.Bucket,
+			Key:           upload.Key,
+			UploadID:      upload.UploadID,
+			PartSize:      framesrvr.UploadPartSize,
+			ContentType:   videoType.ContentType,
+			ContentLength: payload.ContentLength,
+		},
+	)
+}
+
+func (handler *VideoHandler) SignUploadPart(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	var payload framesrvr.SignUploadPartRequest
+	if !decodeJSON(writer, request, &payload) {
+		return
+	}
+
+	if payload.Key == "" || payload.UploadID == "" {
+		writeError(writer, http.StatusBadRequest, "key and upload_id are required")
+		return
+	}
+
+	if payload.PartNumber < 1 || payload.PartNumber > 10000 {
+		writeError(writer, http.StatusBadRequest, "part_number must be between 1 and 10000")
+		return
+	}
+
+	part, err := handler.multipart.SignUploadPart(
+		request.Context(),
+		payload.Key,
+		payload.UploadID,
+		payload.PartNumber,
+	)
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "failed to sign upload part")
+		return
+	}
+
+	writeJSON(writer, http.StatusOK, framesrvr.SignUploadPartResponse{URL: part.URL})
+}
+
+func (handler *VideoHandler) CompleteMultipartUpload(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	var payload framesrvr.CompleteUploadRequest
+	if !decodeJSON(writer, request, &payload) {
+		return
+	}
+
+	if payload.Key == "" || payload.UploadID == "" {
+		writeError(writer, http.StatusBadRequest, "key and upload_id are required")
+		return
+	}
+
+	if payload.ContentLength <= 0 || payload.ContentLength > handler.maxUploadBytes {
+		writeError(writer, http.StatusBadRequest, "content_length is invalid")
+		return
+	}
+
+	if payload.ContentType == "" {
+		writeError(writer, http.StatusBadRequest, "content_type is required")
+		return
+	}
+
+	if len(payload.Parts) == 0 {
+		writeError(writer, http.StatusBadRequest, "parts are required")
+		return
+	}
+
+	if !validCompleteParts(payload.Parts) {
+		writeError(writer, http.StatusBadRequest, "parts must be ordered and include ETags")
+		return
+	}
+
+	result, err := handler.multipart.CompleteMultipartUpload(
+		request.Context(),
+		payload.Key,
+		payload.UploadID,
+		payload.Parts,
+		payload.ContentLength,
+		payload.ContentType,
+	)
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "failed to complete upload")
+		return
+	}
+
+	writeJSON(
+		writer,
+		http.StatusCreated,
+		framesrvr.UploadResponse{
+			Message:       "video uploaded",
+			Bucket:        result.Bucket,
+			Key:           result.Key,
+			Location:      result.Location,
+			ETag:          result.ETag,
+			ContentLength: result.ContentLength,
+			ContentType:   payload.ContentType,
+		},
+	)
+}
+
+func (handler *VideoHandler) AbortMultipartUpload(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	var payload framesrvr.AbortUploadRequest
+	if !decodeJSON(writer, request, &payload) {
+		return
+	}
+
+	if payload.Key == "" || payload.UploadID == "" {
+		writeError(writer, http.StatusBadRequest, "key and upload_id are required")
+		return
+	}
+
+	if err := handler.multipart.AbortMultipartUpload(
+		request.Context(),
+		payload.Key,
+		payload.UploadID,
+	); err != nil {
+		writeError(writer, http.StatusBadGateway, "failed to abort upload")
+		return
+	}
+
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func (handler *VideoHandler) Upload(
@@ -330,6 +543,37 @@ func writeError(
 			"error": message,
 		},
 	)
+}
+
+func decodeJSON(
+	writer http.ResponseWriter,
+	request *http.Request,
+	destination any,
+) bool {
+	defer request.Body.Close()
+
+	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(destination); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid JSON request")
+		return false
+	}
+
+	return true
+}
+
+func validCompleteParts(parts []framesrvr.CompleteUploadPart) bool {
+	previous := int32(0)
+	for _, part := range parts {
+		if part.PartNumber <= previous || part.ETag == "" {
+			return false
+		}
+
+		previous = part.PartNumber
+	}
+
+	return true
 }
 
 func writeJSON(

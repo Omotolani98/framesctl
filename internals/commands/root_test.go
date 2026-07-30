@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,22 +17,40 @@ import (
 )
 
 func TestRunUploadSavesMetadata(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(
 		writer http.ResponseWriter,
 		request *http.Request,
 	) {
-		writer.Header().Set("Content-Type", "application/json")
-		writer.WriteHeader(http.StatusCreated)
-
-		_ = json.NewEncoder(writer).Encode(framesrvr.UploadResponse{
-			Message:       "video uploaded",
-			Bucket:        "videos",
-			Key:           "videos/2026/07/30/xyz.mp4",
-			Location:      "https://s3.example/xyz.mp4",
-			ETag:          "etag-1",
-			ContentLength: 4,
-			ContentType:   "video/mp4",
-		})
+		switch request.URL.Path {
+		case "/api/v1/framesrvr/uploads":
+			writeCommandTestJSON(writer, http.StatusCreated, framesrvr.InitiateUploadResponse{
+				Bucket:        "videos",
+				Key:           "videos/2026/07/30/xyz.mp4",
+				UploadID:      "upload-1",
+				PartSize:      framesrvr.UploadPartSize,
+				ContentType:   "video/mp4",
+				ContentLength: 4,
+			})
+		case "/api/v1/framesrvr/uploads/parts":
+			writeCommandTestJSON(writer, http.StatusOK, framesrvr.SignUploadPartResponse{URL: server.URL + "/s3/part/1"})
+		case "/s3/part/1":
+			_, _ = io.Copy(io.Discard, request.Body)
+			writer.Header().Set("ETag", "etag-1")
+			writer.WriteHeader(http.StatusOK)
+		case "/api/v1/framesrvr/uploads/complete":
+			writeCommandTestJSON(writer, http.StatusCreated, framesrvr.UploadResponse{
+				Message:       "video uploaded",
+				Bucket:        "videos",
+				Key:           "videos/2026/07/30/xyz.mp4",
+				Location:      "https://s3.example/xyz.mp4",
+				ETag:          "etag-1",
+				ContentLength: 4,
+				ContentType:   "video/mp4",
+			})
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	defer server.Close()
 
@@ -95,4 +114,10 @@ func TestRunUploadSavesMetadata(t *testing.T) {
 			publicURL,
 		)
 	}
+}
+
+func writeCommandTestJSON(writer http.ResponseWriter, status int, value any) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+	_ = json.NewEncoder(writer).Encode(value)
 }

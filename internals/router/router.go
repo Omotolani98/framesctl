@@ -32,6 +32,10 @@ func New(videoHandler *handler.VideoHandler) http.Handler {
 
 	router.Route("/api/v1/framesrvr", func(router chi.Router) {
 		router.Post("/videos", videoHandler.Upload)
+		router.Post("/uploads", videoHandler.InitiateMultipartUpload)
+		router.Post("/uploads/parts", videoHandler.SignUploadPart)
+		router.Post("/uploads/complete", videoHandler.CompleteMultipartUpload)
+		router.Post("/uploads/abort", videoHandler.AbortMultipartUpload)
 	})
 
 	return router
