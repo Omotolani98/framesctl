@@ -1,0 +1,20 @@
+# Secrets and local env must never enter the image.
+.env
+.env.*
+
+# VCS and editor noise.
+.git
+.gitignore
+.idea
+.vscode
+
+# Local app data (config, sqlite databases).
+.framesctl/
+*.db
+*.db-*
+
+# Build artifacts.
+framesctl
+framesrvr
+*.test
+*.out
