@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"github.com/Omotolani98/framesctl/internals/config"
+	"github.com/Omotolani98/framesctl/internals/framesrvr"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 const (
@@ -23,6 +25,9 @@ const (
 
 type VideoStore struct {
 	bucket   string
+	region   string
+	s3Client *s3.Client
+	presign  *s3.PresignClient
 	transfer *transfermanager.Client
 }
 
@@ -70,8 +75,158 @@ func NewVideoStore(
 
 	return &VideoStore{
 		bucket:   cfg.AWSBucket,
+		region:   cfg.AWSRegion,
+		s3Client: s3Client,
+		presign:  s3.NewPresignClient(s3Client),
 		transfer: transferClient,
 	}, nil
+}
+
+type MultipartUpload struct {
+	Bucket   string
+	Key      string
+	UploadID string
+}
+
+type SignedUploadPart struct {
+	URL string
+}
+
+func (store *VideoStore) CreateMultipartUpload(
+	ctx context.Context,
+	key string,
+	contentType string,
+) (MultipartUpload, error) {
+	output, err := store.s3Client.CreateMultipartUpload(
+		ctx,
+		&s3.CreateMultipartUploadInput{
+			Bucket:      aws.String(store.bucket),
+			Key:         aws.String(key),
+			ContentType: aws.String(contentType),
+		},
+	)
+	if err != nil {
+		return MultipartUpload{}, fmt.Errorf("create S3 multipart upload: %w", err)
+	}
+
+	return MultipartUpload{
+		Bucket:   store.bucket,
+		Key:      key,
+		UploadID: aws.ToString(output.UploadId),
+	}, nil
+}
+
+func (store *VideoStore) SignUploadPart(
+	ctx context.Context,
+	key string,
+	uploadID string,
+	partNumber int32,
+) (SignedUploadPart, error) {
+	request, err := store.presign.PresignUploadPart(
+		ctx,
+		&s3.UploadPartInput{
+			Bucket:     aws.String(store.bucket),
+			Key:        aws.String(key),
+			UploadId:   aws.String(uploadID),
+			PartNumber: aws.Int32(partNumber),
+		},
+		s3.WithPresignExpires(15*time.Minute),
+	)
+	if err != nil {
+		return SignedUploadPart{}, fmt.Errorf("sign S3 upload part: %w", err)
+	}
+
+	return SignedUploadPart{URL: request.URL}, nil
+}
+
+func (store *VideoStore) CompleteMultipartUpload(
+	ctx context.Context,
+	key string,
+	uploadID string,
+	parts []framesrvr.CompleteUploadPart,
+	contentLength int64,
+	contentType string,
+) (UploadResult, error) {
+	completedParts := make([]types.CompletedPart, 0, len(parts))
+	for _, part := range parts {
+		completedParts = append(
+			completedParts,
+			types.CompletedPart{
+				ETag:       aws.String(part.ETag),
+				PartNumber: aws.Int32(part.PartNumber),
+			},
+		)
+	}
+
+	output, err := store.s3Client.CompleteMultipartUpload(
+		ctx,
+		&s3.CompleteMultipartUploadInput{
+			Bucket:   aws.String(store.bucket),
+			Key:      aws.String(key),
+			UploadId: aws.String(uploadID),
+			MultipartUpload: &types.CompletedMultipartUpload{
+				Parts: completedParts,
+			},
+		},
+	)
+	if err != nil {
+		return UploadResult{}, fmt.Errorf("complete S3 multipart upload: %w", err)
+	}
+
+	head, err := store.s3Client.HeadObject(
+		ctx,
+		&s3.HeadObjectInput{
+			Bucket: aws.String(store.bucket),
+			Key:    aws.String(key),
+		},
+	)
+	if err != nil {
+		return UploadResult{}, fmt.Errorf("verify S3 multipart upload: %w", err)
+	}
+
+	if aws.ToInt64(head.ContentLength) != contentLength {
+		return UploadResult{}, fmt.Errorf(
+			"verify S3 multipart upload: content length is %d, want %d",
+			aws.ToInt64(head.ContentLength),
+			contentLength,
+		)
+	}
+
+	if actualType := aws.ToString(head.ContentType); actualType != "" && actualType != contentType {
+		return UploadResult{}, fmt.Errorf(
+			"verify S3 multipart upload: content type is %q, want %q",
+			actualType,
+			contentType,
+		)
+	}
+
+	return UploadResult{
+		Bucket:        store.bucket,
+		Key:           key,
+		Location:      objectLocation(store.bucket, store.region, key),
+		ETag:          aws.ToString(output.ETag),
+		ContentLength: aws.ToInt64(head.ContentLength),
+	}, nil
+}
+
+func (store *VideoStore) AbortMultipartUpload(
+	ctx context.Context,
+	key string,
+	uploadID string,
+) error {
+	_, err := store.s3Client.AbortMultipartUpload(
+		ctx,
+		&s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(store.bucket),
+			Key:      aws.String(key),
+			UploadId: aws.String(uploadID),
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("abort S3 multipart upload: %w", err)
+	}
+
+	return nil
 }
 
 func (store *VideoStore) Upload(
@@ -103,4 +258,8 @@ func (store *VideoStore) Upload(
 		ETag:          aws.ToString(output.ETag),
 		ContentLength: aws.ToInt64(output.ContentLength),
 	}, nil
+}
+
+func objectLocation(bucket string, region string, key string) string {
+	return fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", bucket, region, key)
 }
