@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
+	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 )
 
@@ -21,6 +24,93 @@ type Config struct {
 	ConfigPath   string
 	DatabasePath string
 	APIBaseURL   string
+	HTTPAddr     string
+
+	AWSAccessKeyID  string
+	AWSSecretKey    string
+	AWSSessionToken string
+	AWSRegion       string
+	AWSBucket       string
+
+	MaxUploadBytes int64
+}
+
+const bytesPerGiB int64 = 1 << 30
+
+func LoadConfig() (Config, error) {
+	if err := godotenv.Load(); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		return Config{}, fmt.Errorf("load .env: %w", err)
+	}
+
+	maxUploadGB, err := getPositiveInt64("MAX_UPLOAD_GB", 10)
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg := Config{
+		HTTPAddr: getEnv("HTTP_ADDR", ":8080"),
+
+		AWSAccessKeyID:  strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID")),
+		AWSSecretKey:    strings.TrimSpace(os.Getenv("AWS_SECRET_KEY")),
+		AWSSessionToken: strings.TrimSpace(os.Getenv("AWS_SESSION_TOKEN")),
+		AWSRegion:       strings.TrimSpace(os.Getenv("AWS_REGION")),
+		AWSBucket:       strings.TrimSpace(os.Getenv("AWS_BUCKET")),
+
+		MaxUploadBytes: maxUploadGB * bytesPerGiB,
+	}
+
+	required := map[string]string{
+		"AWS_ACCESS_KEY_ID": cfg.AWSAccessKeyID,
+		"AWS_SECRET_KEY":    cfg.AWSSecretKey,
+		"AWS_REGION":        cfg.AWSRegion,
+		"AWS_BUCKET":        cfg.AWSBucket,
+	}
+
+	for name, value := range required {
+		if value == "" {
+			return Config{}, fmt.Errorf(
+				"required environment variable %s is empty",
+				name,
+			)
+		}
+	}
+
+	return cfg, nil
+}
+
+func getEnv(name, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+
+	return value
+}
+
+func getPositiveInt64(
+	name string,
+	fallback int64,
+) (int64, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"%s must be a positive integer: %w",
+			name,
+			err,
+		)
+	}
+
+	if value <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero", name)
+	}
+
+	return value, nil
 }
 
 func Load() (*Config, error) {
