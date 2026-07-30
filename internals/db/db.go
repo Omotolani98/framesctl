@@ -61,8 +61,40 @@ func Init(ctx context.Context, path string) error {
 		}
 	}
 
+	if err := migrate(ctx, db); err != nil {
+		_ = db.Close()
+
+		return err
+	}
+
 	instance = db
 	databasePath = path
+
+	return nil
+}
+
+func migrate(ctx context.Context, db *sql.DB) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS uploads (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			filename TEXT NOT NULL,
+			public_key TEXT NOT NULL UNIQUE,
+			public_url TEXT NOT NULL,
+			bucket TEXT NOT NULL,
+			object_key TEXT NOT NULL,
+			location TEXT NOT NULL,
+			etag TEXT NOT NULL,
+			content_length INTEGER NOT NULL,
+			content_type TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
+	}
+
+	for _, statement := range statements {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("run migration: %w", err)
+		}
+	}
 
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Omotolani98/framesctl/internals/framesrvr"
 	"github.com/Omotolani98/framesctl/internals/storage"
 )
 
@@ -35,59 +36,6 @@ type VideoUploader interface {
 type VideoHandler struct {
 	uploader       VideoUploader
 	maxUploadBytes int64
-}
-
-type allowedVideo struct {
-	contentType       string
-	detectedMIMETypes map[string]struct{}
-}
-
-var allowedVideos = map[string]allowedVideo{
-	".mp4": {
-		contentType: "video/mp4",
-		detectedMIMETypes: mimeSet(
-			"video/mp4",
-			"application/octet-stream",
-		),
-	},
-	".mov": {
-		contentType: "video/quicktime",
-		detectedMIMETypes: mimeSet(
-			"video/quicktime",
-			"video/mp4",
-			"application/octet-stream",
-		),
-	},
-	".webm": {
-		contentType: "video/webm",
-		detectedMIMETypes: mimeSet(
-			"video/webm",
-			"application/octet-stream",
-		),
-	},
-	".mkv": {
-		contentType: "video/x-matroska",
-		detectedMIMETypes: mimeSet(
-			"video/x-matroska",
-			"application/octet-stream",
-		),
-	},
-	".avi": {
-		contentType: "video/x-msvideo",
-		detectedMIMETypes: mimeSet(
-			"video/x-msvideo",
-			"video/avi",
-			"application/octet-stream",
-		),
-	},
-	".m4v": {
-		contentType: "video/x-m4v",
-		detectedMIMETypes: mimeSet(
-			"video/x-m4v",
-			"video/mp4",
-			"application/octet-stream",
-		),
-	},
 }
 
 func NewVideoHandler(
@@ -169,13 +117,13 @@ func (handler *VideoHandler) uploadPart(
 		filepath.Ext(part.FileName()),
 	)
 
-	videoType, allowed := allowedVideos[extension]
+	videoType, allowed := framesrvr.LookupVideoType(extension)
 	if !allowed {
 		writeError(
 			writer,
 			http.StatusUnsupportedMediaType,
 			"unsupported video extension; allowed: "+
-				".mp4, .mov, .webm, .mkv, .avi, .m4v",
+				framesrvr.AllowedExtensionsText(),
 		)
 		return
 	}
@@ -205,7 +153,7 @@ func (handler *VideoHandler) uploadPart(
 
 	detectedMIME := http.DetectContentType(header[:headerSize])
 
-	if _, valid := videoType.detectedMIMETypes[detectedMIME]; !valid {
+	if _, valid := videoType.DetectedMIMETypes[detectedMIME]; !valid {
 		writeError(
 			writer,
 			http.StatusUnsupportedMediaType,
@@ -244,7 +192,7 @@ func (handler *VideoHandler) uploadPart(
 	result, err := handler.uploader.Upload(
 		request.Context(),
 		objectKey,
-		videoType.contentType,
+		videoType.ContentType,
 		limitedStream,
 	)
 	if err != nil {
@@ -286,14 +234,14 @@ func (handler *VideoHandler) uploadPart(
 	writeJSON(
 		writer,
 		http.StatusCreated,
-		map[string]any{
-			"message":        "video uploaded",
-			"bucket":         result.Bucket,
-			"key":            result.Key,
-			"location":       result.Location,
-			"etag":           result.ETag,
-			"content_length": result.ContentLength,
-			"content_type":   videoType.contentType,
+		framesrvr.UploadResponse{
+			Message:       "video uploaded",
+			Bucket:        result.Bucket,
+			Key:           result.Key,
+			Location:      result.Location,
+			ETag:          result.ETag,
+			ContentLength: result.ContentLength,
+			ContentType:   videoType.ContentType,
 		},
 	)
 }
@@ -368,16 +316,6 @@ func newVideoKey(extension string) (string, error) {
 		hex.EncodeToString(identifier[:]),
 		extension,
 	), nil
-}
-
-func mimeSet(values ...string) map[string]struct{} {
-	set := make(map[string]struct{}, len(values))
-
-	for _, value := range values {
-		set[value] = struct{}{}
-	}
-
-	return set
 }
 
 func writeError(
