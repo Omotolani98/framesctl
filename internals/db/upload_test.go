@@ -8,6 +8,70 @@ import (
 	"time"
 )
 
+func TestListUploads(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	if err := Init(ctx, path); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer Close()
+
+	older := Upload{
+		Filename:      "older.mp4",
+		PublicKey:     "older-key",
+		PublicURL:     "https://framesrvr.run/older-key",
+		Bucket:        "videos",
+		ObjectKey:     "videos/2026/07/29/older.mp4",
+		Location:      "https://s3.example/older.mp4",
+		ETag:          "etag-older",
+		ContentLength: 1024,
+		ContentType:   "video/mp4",
+		CreatedAt: time.Date(
+			2026, 7, 29, 10, 0, 0, 0, time.UTC,
+		),
+	}
+	newer := older
+	newer.Filename = "newer.webm"
+	newer.PublicKey = "newer-key"
+	newer.PublicURL = "https://framesrvr.run/newer-key"
+	newer.ObjectKey = "videos/2026/07/30/newer.webm"
+	newer.ContentType = "video/webm"
+	newer.CreatedAt = older.CreatedAt.Add(24 * time.Hour)
+
+	for _, upload := range []Upload{older, newer} {
+		if err := SaveUpload(ctx, upload); err != nil {
+			t.Fatalf("save upload: %v", err)
+		}
+	}
+
+	uploads, err := ListUploads(ctx)
+	if err != nil {
+		t.Fatalf("list uploads: %v", err)
+	}
+
+	if len(uploads) != 2 {
+		t.Fatalf("len(uploads) = %d, want 2", len(uploads))
+	}
+
+	if uploads[0].Filename != "newer.webm" ||
+		uploads[1].Filename != "older.mp4" {
+		t.Errorf(
+			"order = (%q, %q), want newest first",
+			uploads[0].Filename,
+			uploads[1].Filename,
+		)
+	}
+
+	if !uploads[0].CreatedAt.Equal(newer.CreatedAt) {
+		t.Errorf(
+			"created_at = %s, want %s",
+			uploads[0].CreatedAt,
+			newer.CreatedAt,
+		)
+	}
+}
+
 func TestSaveUpload(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "test.db")
