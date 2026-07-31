@@ -86,3 +86,66 @@ jobs:
             --generate-notes \
             dist/release/*.tar.gz \
             dist/release/SHA256SUMS
+
+  server-images:
+    needs:
+      - gate
+      - client-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish server images
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -eu
+          owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          framesrvr="ghcr.io/${owner}/framesrvr"
+          framesworker="ghcr.io/${owner}/framesworker"
+
+          latest_args=""
+          case "$VERSION" in
+            *-*) ;;
+            *) latest_args="--tag ${framesrvr}:latest" ;;
+          esac
+
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="$VERSION" \
+            --tag "${framesrvr}:${VERSION}" \
+            $latest_args \
+            --push \
+            -f Dockerfile .
+
+          latest_args=""
+          case "$VERSION" in
+            *-*) ;;
+            *) latest_args="--tag ${framesworker}:latest" ;;
+          esac
+
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="$VERSION" \
+            --tag "${framesworker}:${VERSION}" \
+            $latest_args \
+            --push \
+            -f Dockerfile.framesworker .
