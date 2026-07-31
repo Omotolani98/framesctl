@@ -54,3 +54,15 @@ jobs:
       - name: Build macOS ARM64 framesplayer
         working-directory: apps/framesplayer
         run: bun run build:macos-arm64
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build framesrvr image
+        run: docker build --build-arg VERSION=ci -t framesrvr:ci -f Dockerfile .
+
+      - name: Build framesworker image
+        run: docker build --build-arg VERSION=ci -t framesworker:ci -f Dockerfile.framesworker .
