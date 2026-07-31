@@ -13,13 +13,15 @@ import (
 var (
 	ErrNotFound = errors.New("video metadata not found")
 	ErrExpired  = errors.New("share has expired or was revoked")
+	ErrNoJob    = errors.New("no transcode job is available")
 )
 
 const (
-	StatusUploading = "uploading"
-	StatusQueued    = "queued"
-	StatusReady     = "ready"
-	StatusFailed    = "failed"
+	StatusUploading  = "uploading"
+	StatusQueued     = "queued"
+	StatusProcessing = "processing"
+	StatusReady      = "ready"
+	StatusFailed     = "failed"
 )
 
 type UploadSession struct {
@@ -59,12 +61,23 @@ type Share struct {
 	CreatedAt time.Time
 }
 
+type TranscodeJob struct {
+	ID    string
+	Video Video
+}
+
 type Store interface {
 	SaveUploadSession(ctx context.Context, session UploadSession) error
 	FindUploadSession(ctx context.Context, key string, uploadID string) (UploadSession, error)
 	MarkUploadQueued(ctx context.Context, session UploadSession, etag string) (Video, error)
 	CreateShare(ctx context.Context, videoID string, expiresAt *time.Time) (Share, error)
 	ResolveShare(ctx context.Context, token string) (Video, Share, error)
+}
+
+type TranscodeStore interface {
+	ClaimTranscodeJob(ctx context.Context, workerID string, lease time.Duration) (TranscodeJob, error)
+	MarkTranscodeReady(ctx context.Context, jobID string, videoID string, hlsMasterKey string) error
+	MarkTranscodeFailed(ctx context.Context, jobID string, videoID string, message string) error
 }
 
 func NewID() (string, error) {

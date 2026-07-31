@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/Omotolani98/framesctl/internals/config"
@@ -258,6 +259,64 @@ func (store *VideoStore) Upload(
 		ETag:          aws.ToString(output.ETag),
 		ContentLength: aws.ToInt64(output.ContentLength),
 	}, nil
+}
+
+func (store *VideoStore) Download(
+	ctx context.Context,
+	key string,
+	destination io.Writer,
+) error {
+	output, err := store.s3Client.GetObject(
+		ctx,
+		&s3.GetObjectInput{
+			Bucket: aws.String(store.bucket),
+			Key:    aws.String(key),
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("download S3 object: %w", err)
+	}
+	defer output.Body.Close()
+
+	if _, err := io.Copy(destination, output.Body); err != nil {
+		return fmt.Errorf("write S3 object: %w", err)
+	}
+
+	return nil
+}
+
+func (store *VideoStore) UploadFile(
+	ctx context.Context,
+	key string,
+	contentType string,
+	path string,
+) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open artifact: %w", err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect artifact: %w", err)
+	}
+
+	_, err = store.s3Client.PutObject(
+		ctx,
+		&s3.PutObjectInput{
+			Bucket:        aws.String(store.bucket),
+			Key:           aws.String(key),
+			Body:          file,
+			ContentLength: aws.Int64(info.Size()),
+			ContentType:   aws.String(contentType),
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("upload S3 artifact: %w", err)
+	}
+
+	return nil
 }
 
 func objectLocation(bucket string, region string, key string) string {

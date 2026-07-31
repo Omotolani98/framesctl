@@ -245,16 +245,23 @@ func (store *Store) CreateShare(
 		ExpiresAt: expiresAt,
 	}
 
-	_, err = store.pool.Exec(
+	err = store.pool.QueryRow(
 		ctx,
 		`INSERT INTO shares (id, video_id, token_hash, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, now())`,
+		SELECT $1, id, $3, $4, now()
+		FROM videos
+		WHERE id = $2
+		RETURNING created_at`,
 		share.ID,
 		share.VideoID,
 		tokenHash(token),
 		share.ExpiresAt,
-	)
+	).Scan(&share.CreatedAt)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return video.Share{}, video.ErrNotFound
+		}
+
 		return video.Share{}, fmt.Errorf("create share: %w", err)
 	}
 
@@ -318,6 +325,158 @@ func (store *Store) ResolveShare(
 	}
 
 	return found, share, nil
+}
+
+func (store *Store) ClaimTranscodeJob(
+	ctx context.Context,
+	workerID string,
+	lease time.Duration,
+) (video.TranscodeJob, error) {
+	leaseSeconds := int64(lease.Seconds())
+	if leaseSeconds <= 0 {
+		leaseSeconds = int64((5 * time.Minute).Seconds())
+	}
+
+	row := store.pool.QueryRow(
+		ctx,
+		`WITH next_job AS (
+			SELECT id
+			FROM transcode_jobs
+			WHERE state = 'queued' AND available_at <= now()
+			ORDER BY created_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1
+		)
+		UPDATE transcode_jobs job
+		SET state = 'processing',
+			attempts = attempts + 1,
+			leased_by = $1,
+			lease_expires_at = now() + ($2 * interval '1 second'),
+			updated_at = now()
+		FROM next_job, videos v
+		WHERE job.id = next_job.id AND v.id = job.video_id
+		RETURNING job.id, v.id, v.filename, v.status, v.bucket, v.object_key,
+			v.etag, v.content_length, v.content_type, v.hls_master_key,
+			v.poster_key, v.created_at, v.updated_at`,
+		workerID,
+		leaseSeconds,
+	)
+
+	var job video.TranscodeJob
+	if err := row.Scan(
+		&job.ID,
+		&job.Video.ID,
+		&job.Video.Filename,
+		&job.Video.Status,
+		&job.Video.Bucket,
+		&job.Video.ObjectKey,
+		&job.Video.ETag,
+		&job.Video.ContentLength,
+		&job.Video.ContentType,
+		&job.Video.HLSMasterKey,
+		&job.Video.PosterKey,
+		&job.Video.CreatedAt,
+		&job.Video.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return video.TranscodeJob{}, video.ErrNoJob
+		}
+
+		return video.TranscodeJob{}, fmt.Errorf("claim transcode job: %w", err)
+	}
+
+	if _, err := store.pool.Exec(
+		ctx,
+		`UPDATE videos SET status = $1, updated_at = now() WHERE id = $2`,
+		video.StatusProcessing,
+		job.Video.ID,
+	); err != nil {
+		return video.TranscodeJob{}, fmt.Errorf("mark video processing: %w", err)
+	}
+
+	job.Video.Status = video.StatusProcessing
+
+	return job, nil
+}
+
+func (store *Store) MarkTranscodeReady(
+	ctx context.Context,
+	jobID string,
+	videoID string,
+	hlsMasterKey string,
+) error {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transcode ready update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(
+		ctx,
+		`UPDATE videos
+		SET status = $1, hls_master_key = $2, updated_at = now()
+		WHERE id = $3`,
+		video.StatusReady,
+		hlsMasterKey,
+		videoID,
+	); err != nil {
+		return fmt.Errorf("mark video ready: %w", err)
+	}
+
+	if _, err := tx.Exec(
+		ctx,
+		`UPDATE transcode_jobs
+		SET state = 'completed', updated_at = now(), leased_by = NULL, lease_expires_at = NULL
+		WHERE id = $1`,
+		jobID,
+	); err != nil {
+		return fmt.Errorf("mark transcode job complete: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit transcode ready update: %w", err)
+	}
+
+	return nil
+}
+
+func (store *Store) MarkTranscodeFailed(
+	ctx context.Context,
+	jobID string,
+	videoID string,
+	message string,
+) error {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transcode failure update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(
+		ctx,
+		`UPDATE videos SET status = $1, updated_at = now() WHERE id = $2`,
+		video.StatusFailed,
+		videoID,
+	); err != nil {
+		return fmt.Errorf("mark video failed: %w", err)
+	}
+
+	if _, err := tx.Exec(
+		ctx,
+		`UPDATE transcode_jobs
+		SET state = 'failed', last_error = $2, updated_at = now(), leased_by = NULL, lease_expires_at = NULL
+		WHERE id = $1`,
+		jobID,
+		message,
+	); err != nil {
+		return fmt.Errorf("mark transcode job failed: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit transcode failure update: %w", err)
+	}
+
+	return nil
 }
 
 func scanVideo(row pgx.Row) (video.Video, error) {

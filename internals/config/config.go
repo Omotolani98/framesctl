@@ -27,6 +27,10 @@ type Config struct {
 	HTTPAddr      string
 	DatabaseURL   string
 	PublicBaseURL string
+	WorkerID      string
+	WorkerTempDir string
+	FFmpegPath    string
+	FFprobePath   string
 
 	AWSAccessKeyID  string
 	AWSSecretKey    string
@@ -54,6 +58,10 @@ func LoadConfig() (Config, error) {
 		HTTPAddr:      getEnv("HTTP_ADDR", ":8080"),
 		DatabaseURL:   strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		PublicBaseURL: getEnv("PUBLIC_BASE_URL", "http://localhost:8080"),
+		WorkerID:      getEnv("WORKER_ID", "framesworker"),
+		WorkerTempDir: getEnv("WORKER_TEMP_DIR", os.TempDir()),
+		FFmpegPath:    getEnv("FFMPEG_PATH", "ffmpeg"),
+		FFprobePath:   getEnv("FFPROBE_PATH", "ffprobe"),
 
 		AWSAccessKeyID:  strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID")),
 		AWSSecretKey:    strings.TrimSpace(os.Getenv("AWS_SECRET_KEY")),
