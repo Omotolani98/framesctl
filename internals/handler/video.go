@@ -12,6 +12,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -63,9 +64,18 @@ type MultipartUploader interface {
 	) error
 }
 
+type ObjectReader interface {
+	ReadObject(
+		ctx context.Context,
+		key string,
+		rangeHeader string,
+	) (storage.Object, error)
+}
+
 type VideoHandler struct {
 	uploader       VideoUploader
 	multipart      MultipartUploader
+	objects        ObjectReader
 	metadata       video.Store
 	maxUploadBytes int64
 }
@@ -77,11 +87,17 @@ func NewVideoHandler(
 	},
 	maxUploadBytes int64,
 ) *VideoHandler {
-	return &VideoHandler{
+	handler := &VideoHandler{
 		uploader:       uploader,
 		multipart:      uploader,
 		maxUploadBytes: maxUploadBytes,
 	}
+
+	if objects, ok := uploader.(ObjectReader); ok {
+		handler.objects = objects
+	}
+
+	return handler
 }
 
 func NewVideoHandlerWithMetadata(
@@ -460,6 +476,117 @@ func (handler *VideoHandler) PublicPlayback(
 		ExpiresAt: share.ExpiresAt,
 		MasterURL: masterURL,
 	})
+}
+
+func (handler *VideoHandler) PublicHLSArtifact(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	if handler.metadata == nil || handler.objects == nil {
+		writeError(writer, http.StatusServiceUnavailable, "playback storage is not configured")
+		return
+	}
+
+	token := chi.URLParam(request, "token")
+	artifactPath := chi.URLParam(request, "*")
+	if token == "" || artifactPath == "" {
+		writeError(writer, http.StatusBadRequest, "share token and HLS path are required")
+		return
+	}
+
+	record, _, err := handler.metadata.ResolveShare(request.Context(), token)
+	if err != nil {
+		switch {
+		case errors.Is(err, video.ErrNotFound):
+			writeError(writer, http.StatusNotFound, "share not found")
+		case errors.Is(err, video.ErrExpired):
+			writeError(writer, http.StatusGone, "share has expired")
+		default:
+			writeError(writer, http.StatusInternalServerError, "failed to resolve share")
+		}
+		return
+	}
+
+	if record.HLSMasterKey == "" {
+		writeError(writer, http.StatusConflict, "video is not ready for playback")
+		return
+	}
+
+	objectKey, ok := hlsObjectKey(record.HLSMasterKey, artifactPath)
+	if !ok {
+		writeError(writer, http.StatusBadRequest, "invalid HLS path")
+		return
+	}
+
+	object, err := handler.objects.ReadObject(
+		request.Context(),
+		objectKey,
+		request.Header.Get("Range"),
+	)
+	if err != nil {
+		writeError(writer, http.StatusBadGateway, "failed to read playback artifact")
+		return
+	}
+	defer object.Body.Close()
+
+	contentType := object.ContentType
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = hlsContentType(objectKey)
+	}
+
+	writer.Header().Set("Content-Type", contentType)
+	writer.Header().Set("Accept-Ranges", "bytes")
+	writer.Header().Set("Cache-Control", "private, no-store")
+	if object.ContentLength >= 0 {
+		writer.Header().Set("Content-Length", fmt.Sprintf("%d", object.ContentLength))
+	}
+	if object.ETag != "" {
+		writer.Header().Set("ETag", object.ETag)
+	}
+	if object.ContentRange != "" {
+		writer.Header().Set("Content-Range", object.ContentRange)
+		writer.WriteHeader(http.StatusPartialContent)
+	} else {
+		writer.WriteHeader(http.StatusOK)
+	}
+
+	_, _ = io.Copy(writer, object.Body)
+}
+
+func hlsObjectKey(masterKey string, artifactPath string) (string, bool) {
+	if artifactPath == "" || strings.Contains(artifactPath, "\\") || strings.HasPrefix(artifactPath, "/") {
+		return "", false
+	}
+	for _, part := range strings.Split(artifactPath, "/") {
+		if part == "" || part == "." || part == ".." {
+			return "", false
+		}
+	}
+
+	clean := pathpkg.Clean("/" + artifactPath)
+	if clean == "/" {
+		return "", false
+	}
+
+	relative := strings.TrimPrefix(clean, "/")
+	if relative == "master.m3u8" {
+		return masterKey, true
+	}
+
+	return pathpkg.Dir(masterKey) + "/" + relative, true
+}
+
+func hlsContentType(key string) string {
+	switch strings.ToLower(pathpkg.Ext(key)) {
+	case ".m3u8":
+		return "application/vnd.apple.mpegurl"
+	case ".m4s":
+		return "video/iso.segment"
+	case ".mp4":
+		return "video/mp4"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func (handler *VideoHandler) Upload(
