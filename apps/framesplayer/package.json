@@ -22,5 +22,8 @@
     "@opentui/react": "^0.4.5",
     "@tuiparts/react": "^0.0.5",
     "react": "^19.2.8"
+  },
+  "patchedDependencies": {
+    "@opentui/core@0.4.5": "patches/@opentui%2Fcore@0.4.5.patch"
   }
 }
