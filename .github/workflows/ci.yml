@@ -55,6 +55,9 @@ jobs:
         working-directory: apps/framesplayer
         run: bun run build:macos-arm64
 
+      - name: Smoke compiled framesplayer
+        run: sh scripts/smoke-framesplayer-compiled.sh
+
   docker:
     runs-on: ubuntu-latest
     steps:

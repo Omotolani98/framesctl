@@ -73,6 +73,9 @@ jobs:
       - name: Package client binaries
         run: scripts/package-release.sh "${{ needs.gate.outputs.version }}" dist/release
 
+      - name: Smoke compiled framesplayer
+        run: sh scripts/smoke-framesplayer-compiled.sh "dist/release/package/framesctl_${{ needs.gate.outputs.version }}_darwin_arm64/framesplayer"
+
       - name: Write checksums
         working-directory: dist/release
         run: shasum -a 256 *.tar.gz > SHA256SUMS
