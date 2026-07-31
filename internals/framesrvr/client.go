@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -22,6 +23,7 @@ const (
 	signUploadPartPath = "/api/v1/framesrvr/uploads/parts"
 	completeUploadPath = "/api/v1/framesrvr/uploads/complete"
 	abortUploadPath    = "/api/v1/framesrvr/uploads/abort"
+	publicSharePath    = "/api/v1/public/shares/"
 	maxUploadRetries   = 3
 )
 
@@ -44,6 +46,50 @@ func NewClient(baseURL string) (*Client, error) {
 
 func (client *Client) UploadURL() string {
 	return client.baseURL + initiateUploadPath
+}
+
+func (client *Client) CreateShare(
+	ctx context.Context,
+	videoID string,
+	expiresAt *time.Time,
+) (*ShareResponse, error) {
+	if strings.TrimSpace(videoID) == "" {
+		return nil, errors.New("video id is required")
+	}
+
+	request := CreateShareRequest{}
+	if expiresAt != nil {
+		request.ExpiresAt = expiresAt
+	}
+
+	path := "/api/v1/videos/" + url.PathEscape(videoID) + "/shares"
+	var response ShareResponse
+	if err := client.postJSON(ctx, path, request, http.StatusCreated, &response); err != nil {
+		return nil, err
+	}
+
+	return &response, nil
+}
+
+func (client *Client) PublicPlayback(
+	ctx context.Context,
+	token string,
+) (*PublicPlaybackResponse, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, errors.New("share token is required")
+	}
+
+	var response PublicPlaybackResponse
+	if err := client.getJSON(
+		ctx,
+		publicSharePath+url.PathEscape(token),
+		http.StatusOK,
+		&response,
+	); err != nil {
+		return nil, err
+	}
+
+	return &response, nil
 }
 
 func (client *Client) UploadVideo(
@@ -424,6 +470,44 @@ func (client *Client) postJSON(
 
 	if destination == nil {
 		return nil
+	}
+
+	if err := json.Unmarshal(responseBody, destination); err != nil {
+		return fmt.Errorf("decode framesrvr response: %w", err)
+	}
+
+	return nil
+}
+
+func (client *Client) getJSON(
+	ctx context.Context,
+	path string,
+	wantStatus int,
+	destination any,
+) error {
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		client.baseURL+path,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("build framesrvr request: %w", err)
+	}
+
+	response, err := client.httpClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("call framesrvr API: %w", err)
+	}
+	defer response.Body.Close()
+
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read framesrvr response: %w", err)
+	}
+
+	if response.StatusCode != wantStatus {
+		return decodeAPIError(response.StatusCode, responseBody)
 	}
 
 	if err := json.Unmarshal(responseBody, destination); err != nil {

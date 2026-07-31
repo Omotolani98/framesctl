@@ -20,11 +20,13 @@ const (
 )
 
 type Config struct {
-	AppPath      string
-	ConfigPath   string
-	DatabasePath string
-	APIBaseURL   string
-	HTTPAddr     string
+	AppPath       string
+	ConfigPath    string
+	DatabasePath  string
+	APIBaseURL    string
+	HTTPAddr      string
+	DatabaseURL   string
+	PublicBaseURL string
 
 	AWSAccessKeyID  string
 	AWSSecretKey    string
@@ -49,7 +51,9 @@ func LoadConfig() (Config, error) {
 	}
 
 	cfg := Config{
-		HTTPAddr: getEnv("HTTP_ADDR", ":8080"),
+		HTTPAddr:      getEnv("HTTP_ADDR", ":8080"),
+		DatabaseURL:   strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		PublicBaseURL: getEnv("PUBLIC_BASE_URL", "http://localhost:8080"),
 
 		AWSAccessKeyID:  strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID")),
 		AWSSecretKey:    strings.TrimSpace(os.Getenv("AWS_SECRET_KEY")),

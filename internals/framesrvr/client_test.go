@@ -314,6 +314,72 @@ func TestClientUploadURL(t *testing.T) {
 	}
 }
 
+func TestCreateShare(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		if request.URL.Path != "/api/v1/videos/video-1/shares" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		writeJSONResponse(writer, http.StatusCreated, ShareResponse{
+			ID:      "share-1",
+			VideoID: "video-1",
+			URL:     "https://framesrvr.example/watch/token",
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	share, err := client.CreateShare(context.Background(), "video-1", nil)
+	if err != nil {
+		t.Fatalf("create share: %v", err)
+	}
+
+	if share.URL != "https://framesrvr.example/watch/token" {
+		t.Errorf("share url = %q", share.URL)
+	}
+}
+
+func TestPublicPlayback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		if request.URL.Path != "/api/v1/public/shares/token" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		writeJSONResponse(writer, http.StatusOK, PublicPlaybackResponse{
+			Title:     "clip.mp4",
+			Status:    "queued",
+			MasterURL: "/api/v1/public/shares/token/hls/master.m3u8",
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	playback, err := client.PublicPlayback(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("public playback: %v", err)
+	}
+
+	if playback.Status != "queued" {
+		t.Errorf("status = %q", playback.Status)
+	}
+}
+
 func writeJSONResponse(writer http.ResponseWriter, status int, payload any) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
