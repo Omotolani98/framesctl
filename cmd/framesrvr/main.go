@@ -14,6 +14,7 @@ import (
 
 	"github.com/Omotolani98/framesctl/internals/config"
 	"github.com/Omotolani98/framesctl/internals/handler"
+	pgstore "github.com/Omotolani98/framesctl/internals/postgres"
 	"github.com/Omotolani98/framesctl/internals/router"
 	"github.com/Omotolani98/framesctl/internals/storage"
 )
@@ -36,10 +37,22 @@ func main() {
 		log.Fatalf("initialize S3 storage: %v", err)
 	}
 
-	videoHandler := handler.NewVideoHandler(
-		videoStore,
-		cfg.MaxUploadBytes,
-	)
+	videoHandler := handler.NewVideoHandler(videoStore, cfg.MaxUploadBytes)
+	if cfg.DatabaseURL != "" {
+		metadataStore, err := pgstore.Open(ctx, cfg.DatabaseURL, cfg.PublicBaseURL)
+		if err != nil {
+			log.Fatalf("initialize postgres metadata store: %v", err)
+		}
+		defer metadataStore.Close()
+
+		videoHandler = handler.NewVideoHandlerWithMetadata(
+			videoStore,
+			metadataStore,
+			cfg.MaxUploadBytes,
+		)
+	} else {
+		log.Println("DATABASE_URL is empty; server-managed shares and playback metadata are disabled")
+	}
 
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,

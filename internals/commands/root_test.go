@@ -41,12 +41,20 @@ func TestRunUploadSavesMetadata(t *testing.T) {
 		case "/api/v1/framesrvr/uploads/complete":
 			writeCommandTestJSON(writer, http.StatusCreated, framesrvr.UploadResponse{
 				Message:       "video uploaded",
+				VideoID:       "video-1",
+				Status:        "queued",
 				Bucket:        "videos",
 				Key:           "videos/2026/07/30/xyz.mp4",
 				Location:      "https://s3.example/xyz.mp4",
 				ETag:          "etag-1",
 				ContentLength: 4,
 				ContentType:   "video/mp4",
+			})
+		case "/api/v1/videos/video-1/shares":
+			writeCommandTestJSON(writer, http.StatusCreated, framesrvr.ShareResponse{
+				ID:      "share-1",
+				VideoID: "video-1",
+				URL:     "https://framesrvr.example/watch/share-token",
 			})
 		default:
 			writer.WriteHeader(http.StatusNotFound)
@@ -81,7 +89,7 @@ func TestRunUploadSavesMetadata(t *testing.T) {
 	}
 
 	printed := output.String()
-	if !strings.Contains(printed, "https://framesrvr.run/") {
+	if !strings.Contains(printed, "https://framesrvr.example/watch/share-token") {
 		t.Fatalf("output %q missing public url", printed)
 	}
 

@@ -131,12 +131,25 @@ func runUpload(
 		"duration", time.Since(started).Round(time.Millisecond),
 	)
 
-	key, err := newURLKey()
-	if err != nil {
-		return err
-	}
+	key := ""
+	publicURL := ""
+	if upload.VideoID != "" {
+		share, err := client.CreateShare(cmd.Context(), upload.VideoID, nil)
+		if err != nil {
+			return fmt.Errorf("create public share: %w", err)
+		}
 
-	publicURL := publicURLBase + "/" + key
+		publicURL = share.URL
+		key = filepath.Base(publicURL)
+	} else {
+		var err error
+		key, err = newURLKey()
+		if err != nil {
+			return err
+		}
+
+		publicURL = publicURLBase + "/" + key
+	}
 
 	record := db.Upload{
 		Filename:      filepath.Base(path),

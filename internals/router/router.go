@@ -38,5 +38,10 @@ func New(videoHandler *handler.VideoHandler) http.Handler {
 		router.Post("/uploads/abort", videoHandler.AbortMultipartUpload)
 	})
 
+	router.Route("/api/v1", func(router chi.Router) {
+		router.Post("/videos/{videoID}/shares", videoHandler.CreateShare)
+		router.Get("/public/shares/{token}", videoHandler.PublicPlayback)
+	})
+
 	return router
 }

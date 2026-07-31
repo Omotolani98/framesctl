@@ -18,9 +18,12 @@ import (
 
 	"github.com/Omotolani98/framesctl/internals/framesrvr"
 	"github.com/Omotolani98/framesctl/internals/storage"
+	"github.com/Omotolani98/framesctl/internals/video"
+	"github.com/go-chi/chi/v5"
 )
 
 const multipartOverheadAllowance int64 = 1 << 20 // 1 MiB
+const uploadSessionTTL = 24 * time.Hour
 
 var ErrVideoTooLarge = errors.New("video exceeds maximum size")
 
@@ -63,6 +66,7 @@ type MultipartUploader interface {
 type VideoHandler struct {
 	uploader       VideoUploader
 	multipart      MultipartUploader
+	metadata       video.Store
 	maxUploadBytes int64
 }
 
@@ -78,6 +82,20 @@ func NewVideoHandler(
 		multipart:      uploader,
 		maxUploadBytes: maxUploadBytes,
 	}
+}
+
+func NewVideoHandlerWithMetadata(
+	uploader interface {
+		VideoUploader
+		MultipartUploader
+	},
+	metadata video.Store,
+	maxUploadBytes int64,
+) *VideoHandler {
+	handler := NewVideoHandler(uploader, maxUploadBytes)
+	handler.metadata = metadata
+
+	return handler
 }
 
 func (handler *VideoHandler) InitiateMultipartUpload(
@@ -126,10 +144,63 @@ func (handler *VideoHandler) InitiateMultipartUpload(
 		return
 	}
 
+	var (
+		videoID   string
+		sessionID string
+	)
+	if handler.metadata != nil {
+		videoID, err = video.NewID()
+		if err != nil {
+			_ = handler.multipart.AbortMultipartUpload(
+				request.Context(),
+				upload.Key,
+				upload.UploadID,
+			)
+			writeError(writer, http.StatusInternalServerError, "could not generate video identifier")
+			return
+		}
+
+		sessionID, err = video.NewID()
+		if err != nil {
+			_ = handler.multipart.AbortMultipartUpload(
+				request.Context(),
+				upload.Key,
+				upload.UploadID,
+			)
+			writeError(writer, http.StatusInternalServerError, "could not generate upload session")
+			return
+		}
+
+		if err := handler.metadata.SaveUploadSession(
+			request.Context(),
+			video.UploadSession{
+				ID:            sessionID,
+				VideoID:       videoID,
+				Filename:      payload.Filename,
+				Bucket:        upload.Bucket,
+				ObjectKey:     upload.Key,
+				S3UploadID:    upload.UploadID,
+				ContentLength: payload.ContentLength,
+				ContentType:   videoType.ContentType,
+				ExpiresAt:     time.Now().UTC().Add(uploadSessionTTL),
+			},
+		); err != nil {
+			_ = handler.multipart.AbortMultipartUpload(
+				request.Context(),
+				upload.Key,
+				upload.UploadID,
+			)
+			writeError(writer, http.StatusInternalServerError, "failed to save upload metadata")
+			return
+		}
+	}
+
 	writeJSON(
 		writer,
 		http.StatusCreated,
 		framesrvr.InitiateUploadResponse{
+			VideoID:       videoID,
+			SessionID:     sessionID,
 			Bucket:        upload.Bucket,
 			Key:           upload.Key,
 			UploadID:      upload.UploadID,
@@ -207,6 +278,28 @@ func (handler *VideoHandler) CompleteMultipartUpload(
 		return
 	}
 
+	var session video.UploadSession
+	if handler.metadata != nil {
+		var err error
+		session, err = handler.metadata.FindUploadSession(
+			request.Context(),
+			payload.Key,
+			payload.UploadID,
+		)
+		if err != nil {
+			if errors.Is(err, video.ErrNotFound) {
+				writeError(writer, http.StatusNotFound, "upload session not found")
+				return
+			}
+
+			writeError(writer, http.StatusInternalServerError, "failed to load upload metadata")
+			return
+		}
+
+		payload.ContentLength = session.ContentLength
+		payload.ContentType = session.ContentType
+	}
+
 	result, err := handler.multipart.CompleteMultipartUpload(
 		request.Context(),
 		payload.Key,
@@ -220,11 +313,30 @@ func (handler *VideoHandler) CompleteMultipartUpload(
 		return
 	}
 
+	videoID := ""
+	status := ""
+	if handler.metadata != nil {
+		record, err := handler.metadata.MarkUploadQueued(
+			request.Context(),
+			session,
+			result.ETag,
+		)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "failed to save completed upload metadata")
+			return
+		}
+
+		videoID = record.ID
+		status = record.Status
+	}
+
 	writeJSON(
 		writer,
 		http.StatusCreated,
 		framesrvr.UploadResponse{
 			Message:       "video uploaded",
+			VideoID:       videoID,
+			Status:        status,
 			Bucket:        result.Bucket,
 			Key:           result.Key,
 			Location:      result.Location,
@@ -259,6 +371,95 @@ func (handler *VideoHandler) AbortMultipartUpload(
 	}
 
 	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (handler *VideoHandler) CreateShare(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	if handler.metadata == nil {
+		writeError(writer, http.StatusServiceUnavailable, "video metadata store is not configured")
+		return
+	}
+
+	videoID := chi.URLParam(request, "videoID")
+	if videoID == "" {
+		writeError(writer, http.StatusBadRequest, "video id is required")
+		return
+	}
+
+	var payload framesrvr.CreateShareRequest
+	if !decodeJSON(writer, request, &payload) {
+		return
+	}
+
+	if payload.ExpiresAt != nil && !payload.ExpiresAt.After(time.Now().UTC()) {
+		writeError(writer, http.StatusBadRequest, "expires_at must be in the future")
+		return
+	}
+
+	share, err := handler.metadata.CreateShare(
+		request.Context(),
+		videoID,
+		payload.ExpiresAt,
+	)
+	if err != nil {
+		if errors.Is(err, video.ErrNotFound) {
+			writeError(writer, http.StatusNotFound, "video not found")
+			return
+		}
+
+		writeError(writer, http.StatusInternalServerError, "failed to create share")
+		return
+	}
+
+	writeJSON(writer, http.StatusCreated, framesrvr.ShareResponse{
+		ID:        share.ID,
+		VideoID:   share.VideoID,
+		URL:       share.URL,
+		ExpiresAt: share.ExpiresAt,
+	})
+}
+
+func (handler *VideoHandler) PublicPlayback(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	if handler.metadata == nil {
+		writeError(writer, http.StatusServiceUnavailable, "video metadata store is not configured")
+		return
+	}
+
+	token := chi.URLParam(request, "token")
+	if token == "" {
+		writeError(writer, http.StatusBadRequest, "share token is required")
+		return
+	}
+
+	record, share, err := handler.metadata.ResolveShare(request.Context(), token)
+	if err != nil {
+		switch {
+		case errors.Is(err, video.ErrNotFound):
+			writeError(writer, http.StatusNotFound, "share not found")
+		case errors.Is(err, video.ErrExpired):
+			writeError(writer, http.StatusGone, "share has expired")
+		default:
+			writeError(writer, http.StatusInternalServerError, "failed to resolve share")
+		}
+		return
+	}
+
+	masterURL := ""
+	if record.HLSMasterKey != "" {
+		masterURL = "/api/v1/public/shares/" + token + "/hls/master.m3u8"
+	}
+
+	writeJSON(writer, http.StatusOK, framesrvr.PublicPlaybackResponse{
+		Title:     record.Filename,
+		Status:    record.Status,
+		ExpiresAt: share.ExpiresAt,
+		MasterURL: masterURL,
+	})
 }
 
 func (handler *VideoHandler) Upload(
