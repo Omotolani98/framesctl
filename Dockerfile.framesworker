@@ -8,33 +8,34 @@ ARG VERSION=dev
 
 WORKDIR /src
 
-# Cache dependencies separately from source so code edits don't re-download modules.
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
 
-# Static binary: modernc.org/sqlite is pure Go, so CGO can stay off.
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
     -ldflags="-s -w -X github.com/Omotolani98/framesctl/internals/version.Version=${VERSION}" \
-    -o /out/framesrvr \
-    ./cmd/framesrvr
+    -o /out/framesworker \
+    ./cmd/framesworker
 
 # ---------- Runtime stage ----------
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM debian:bookworm-slim
 
 ARG VERSION=dev
 
-LABEL org.opencontainers.image.title="framesrvr" \
-      org.opencontainers.image.description="framesctl upload and playback API server" \
+LABEL org.opencontainers.image.title="framesworker" \
+      org.opencontainers.image.description="framesctl FFmpeg HLS transcoding worker" \
       org.opencontainers.image.source="https://github.com/Omotolani98/framesctl" \
       org.opencontainers.image.version="${VERSION}"
 
-COPY --from=build /out/framesrvr /framesrvr
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --system --uid 10001 framesworker
 
-EXPOSE 8080
+COPY --from=build /out/framesworker /usr/local/bin/framesworker
 
-USER nonroot:nonroot
+USER framesworker:framesworker
 
-ENTRYPOINT ["/framesrvr"]
+ENTRYPOINT ["/usr/local/bin/framesworker"]
