@@ -41,6 +41,7 @@ func New(videoHandler *handler.VideoHandler) http.Handler {
 	router.Route("/api/v1", func(router chi.Router) {
 		router.Post("/videos/{videoID}/shares", videoHandler.CreateShare)
 		router.Get("/public/shares/{token}", videoHandler.PublicPlayback)
+		router.Get("/public/shares/{token}/hls/*", videoHandler.PublicHLSArtifact)
 	})
 
 	return router

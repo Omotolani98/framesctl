@@ -40,6 +40,15 @@ type UploadResult struct {
 	ContentLength int64
 }
 
+type Object struct {
+	Body          io.ReadCloser
+	ContentLength int64
+	ContentType   string
+	ETag          string
+	ContentRange  string
+	AcceptRanges  string
+}
+
 func NewVideoStore(
 	ctx context.Context,
 	cfg config.Config,
@@ -317,6 +326,34 @@ func (store *VideoStore) UploadFile(
 	}
 
 	return nil
+}
+
+func (store *VideoStore) ReadObject(
+	ctx context.Context,
+	key string,
+	rangeHeader string,
+) (Object, error) {
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(store.bucket),
+		Key:    aws.String(key),
+	}
+	if rangeHeader != "" {
+		input.Range = aws.String(rangeHeader)
+	}
+
+	output, err := store.s3Client.GetObject(ctx, input)
+	if err != nil {
+		return Object{}, fmt.Errorf("read S3 object: %w", err)
+	}
+
+	return Object{
+		Body:          output.Body,
+		ContentLength: aws.ToInt64(output.ContentLength),
+		ContentType:   aws.ToString(output.ContentType),
+		ETag:          aws.ToString(output.ETag),
+		ContentRange:  aws.ToString(output.ContentRange),
+		AcceptRanges:  aws.ToString(output.AcceptRanges),
+	}, nil
 }
 
 func objectLocation(bucket string, region string, key string) string {
