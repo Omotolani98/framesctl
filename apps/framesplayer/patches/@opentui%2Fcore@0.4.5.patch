@@ -1,0 +1,17 @@
+diff --git a/chunk-bun-t2myhmwd.js b/chunk-bun-t2myhmwd.js
+index 701d70dea2174e98ab56f4d614e678e868561479..57a4a89a7b66b097f1a79d5f9414de63368c6d93 100644
+--- a/chunk-bun-t2myhmwd.js
++++ b/chunk-bun-t2myhmwd.js
+@@ -878,7 +878,11 @@ async function resolveBundledFilePath(key, loadBundledFile, fallbackPath, metaUr
+     }
+     return await loadBundledFilePath(loadBundledFile, metaUrl, options.loadBundledFileFallback ?? false) ?? path;
+   }
+-  return normalizeLoadedFilePath((await loadBundledFile()).default, metaUrl);
++  const loadedPath = (await loadBundledFile()).default;
++  if (typeof loadedPath !== "string") {
++    return resolveFallbackFilePath(fallbackPath, metaUrl);
++  }
++  return normalizeLoadedFilePath(loadedPath, metaUrl);
+ }
+ function resolveFallbackFilePath(fallbackPath, metaUrl) {
+   const path = typeof fallbackPath === "function" ? fallbackPath() : fallbackPath;
