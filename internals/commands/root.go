@@ -78,6 +78,7 @@ func InitRootCmd(cfg *config.Config) *cobra.Command {
 	)
 	rootCmd.MarkFlagsMutuallyExclusive("file", "list")
 	rootCmd.AddCommand(newListCmd())
+	rootCmd.AddCommand(newPlayCmd())
 
 	return rootCmd
 }
