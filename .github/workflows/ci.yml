@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+          cache: true
+
+      - name: Test Go packages
+        run: go test ./...
+
+      - name: Vet Go packages
+        run: go vet ./...
+
+  framesplayer:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.22"
+
+      - name: Install framesplayer dependencies
+        working-directory: apps/framesplayer
+        run: bun install --frozen-lockfile
+
+      - name: Test framesplayer
+        working-directory: apps/framesplayer
+        run: bun test
+
+      - name: Typecheck framesplayer
+        working-directory: apps/framesplayer
+        run: bun run typecheck
+
+      - name: Build macOS ARM64 framesplayer
+        working-directory: apps/framesplayer
+        run: bun run build:macos-arm64

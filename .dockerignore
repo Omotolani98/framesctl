@@ -16,5 +16,10 @@
 # Build artifacts.
 framesctl
 framesrvr
+framesworker
+bin/
+dist/
+apps/framesplayer/node_modules/
+apps/framesplayer/dist/
 *.test
 *.out
